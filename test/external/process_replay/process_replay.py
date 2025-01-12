@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # compare kernels created by HEAD against master
 from collections import defaultdict
-import os, multiprocessing, logging, pickle, sqlite3, difflib, functools, warnings
+import os, multiprocessing, logging, pickle, sqlite3, difflib, functools, warnings, itertools
 from typing import Callable, List, Set, Tuple, Union, cast
 from tinygrad.helpers import VERSION, Context, ContextVar, colored, db_connection, getenv, tqdm
-from tinygrad.engine.schedule import ScheduleContext, schedule_uop
+from tinygrad import Tensor
 from tinygrad.codegen.kernel import Kernel, Opt
 from tinygrad.renderer import Renderer
-from tinygrad.ops import UOp
+from tinygrad.ops import UOp, Ops
 
 # *** process replay settings
 
@@ -30,9 +30,17 @@ class ProcessReplayWarning(Warning): pass
 
 # *** recreators
 
-def recreate_sched(ast:UOp, assigns:Set[UOp]) -> UOp:
-  # NOTE: process replay isn't meant to actually schedule anything
-  return schedule_uop(ast, ScheduleContext(assigns=assigns, tensor_uops=defaultdict(list))).ast
+def recreate_sched(in_sink:UOp, seed:int) -> UOp:
+  UOp.buffer_num = itertools.count(seed)
+  tensors:list[Tensor] = []
+  for x in in_sink.src:
+    tensors.append(t:=Tensor(x))
+    # for some reason tensor does not (sometimes) init with lazydata passed in x
+    t.lazydata = x
+  # disable memory planner, it opens devices
+  with Context(NO_MEMORY_PLANNER=1):
+    schedule = Tensor.schedule(*tensors)
+  return UOp(Ops.SINK, src=tuple(x.ast for x in schedule))
 def recreate_kernel(ast:UOp, opts:Renderer, applied_opts:List[Opt], name:str) -> str:
   k = Kernel(ast, opts=opts)
   for opt in applied_opts: k.apply_opt(opt)
@@ -64,15 +72,15 @@ def diff(offset:int, name:str, fxn:Callable) -> Union[Tuple[int, int], bool]:
       if good is None: continue
     except Exception as e:
       changed += 1
-      warnings.warn(f"FAILED TO RECREATE KERNEL {e}", ProcessReplayWarning)
+      warnings.warn(colored(f"FAILED TO RECREATE KERNEL {e}", "red"), ProcessReplayWarning)
       for x in args[:-1]: logging.info(x)
       continue
     # diff kernels
     try: assert args[-1] == good
     except AssertionError:
       changed += 1
-      logging.info("PROCESS REPLAY DETECTED CHANGE")
-      for x in args[:-1]: logging.info(x)
+      #logging.info(colored("PROCESS REPLAY DETECTED CHANGE", "red"))
+      #for x in args[:-1]: logging.info(x)
       changes = list(difflib.unified_diff(str(good).splitlines(), str(args[-1]).splitlines()))
       additions += len([x for x in changes if x.startswith("+")])
       deletions += len([x for x in changes if x.startswith("-")])

@@ -249,9 +249,6 @@ def schedule_uop(pre:UOp, ctx:ScheduleContext) -> ScheduleItem:
         and ShapeTracker.from_shape(s.shape).shrink(m) == s.shrink(m)) for x in ops):
       raise RuntimeError("self operand of augmented assign must be contiguous.\nhelp: consider using .contiguous():\n"
                          +colored("   - a += a.T\n", "red")+colored("   + a += a.T.contiguous()", "green"))
-  # capture process replay
-  if CAPTURE_PROCESS_REPLAY:
-    with Context(PICKLE_BUFFERS=0): PROCESS_REPLAY_CAPTURE[str(pre.key)] = pickle.dumps((pre, si_ctx.assigns, ContextVar._cache, sink))
   return ScheduleItem(sink, tuple(u.buffer for u in si_ctx.bufs if u.size != 0), tuple(si_ctx.metadata),
                       tuple(ubuf for ubuf,ops in si_ctx.assign_adj.items() if any(x.op is Ops.PRELOAD for x in ops)))
 
@@ -538,6 +535,8 @@ remove_movement_ops = PatternMatcher([
 
 @track_rewrites(named=True)
 def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> tuple[list[ScheduleItem], dict[Variable, int], dict[UOp, UOp]]:
+  # TODO: this is a hack.
+  seed = int(repr(UOp.buffer_num)[6:-1])
   if not skip_check: type_verify(list(UOp.sink(*outs).toposort), tensor_uop_spec)
   # to_uop is removing (many) of the movement ops
   sink = add_buffers(UOp.sink(*outs), ctx:=ScheduleContext(), cache={})
@@ -551,9 +550,11 @@ def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> 
   graph_rewrite(sink, break_sched, ctx)
   # preschedule realize groups
   prescheduled: list[ScheduleItem] = []
+  pre_pre = []
   for store_uops in store_groups:
     if len(stores:=[ctx.realizes[u] for u in store_uops if ctx.realizes[u].op is Ops.STORE]) != 0:
       prescheduled.append(schedule_uop(UOp.sink(*stores), ctx))
+      pre_pre.append(schedule_uop(UOp.sink(*stores), ctx).ast)
       # can only schedule once
       for buf_uop in store_uops:
         for luop in ctx.tensor_uops[buf_uop]: ctx.becomes_map[luop] = buf_uop.view(unwrap(luop.st))
@@ -579,6 +580,12 @@ def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> 
     for x in graph[si]:
       in_degree[x] -= 1
       if in_degree[x] == 0: queue.append(x)
+  # capture process replay
+  if CAPTURE_PROCESS_REPLAY:
+    # in comes tensors, out goes asts
+    in_sink = UOp(Ops.SINK, src=tuple(outs))
+    out_sink = UOp(Ops.SINK, src=tuple([x.ast for x in schedule]))
+    with Context(PICKLE_BUFFERS=0): PROCESS_REPLAY_CAPTURE[str(in_sink.key)] = pickle.dumps((in_sink, seed, ContextVar._cache, out_sink))
   # confirm everything was scheduled correctly
   if len(schedule) != (groups:=len(prescheduled)): raise RuntimeError(f"cycle detected in graph, grouped {groups} but only scheduled {len(schedule)}")
   if DEBUG >= 1 and len(schedule) >= 10: print(f"scheduled {len(schedule)} kernels")
