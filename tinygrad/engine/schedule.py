@@ -83,6 +83,7 @@ def collapse_const_reduce(root:UOp, x:UOp):
 sym = symbolic_simple+PatternMatcher([
   (UPat(set(Ops)-{Ops.SINK}, name="root"), lambda root: root.const_like(0) if root.base.st is not None and root.size == 0 \
       and not (root.base.op is Ops.CONST and root.base.arg == 0) else None),
+  (UPat(Ops.DETACH, name="root"), lambda root: root.src[0]),
   (UPat(Ops.REDUCE_AXIS, name="root", src=(UPat(Ops.CONST, arg=0),)), lambda root: root.const_like(identity_element(root.arg[0], root.dtype))),
   (UPat(Ops.REDUCE_AXIS, name="root", src=(UPat.cvar("x"),)), collapse_const_reduce),
   (UPat(Ops.CONTIGUOUS, src=(UPat(Ops.VIEW, name="view", src=(UPat(set(Ops)-{Ops.CONST}, name="base"),)),)),
@@ -147,7 +148,7 @@ to_ast = PatternMatcher([
   (UPat(Ops.STORE, name="root", src=(UPat(Ops.LOAD, src=(UPat.var("glbl"), UPat())), UPat.var("st"), UPat.var("v"))), lambda root,glbl,st,v: root.replace(src=(glbl, st, v))),
   (UPat(Ops.LOAD, name="root", src=(UPat(Ops.LOAD, src=(UPat.var("glbl"), UPat())), UPat.var("st"))), lambda root,glbl,st: root.replace(src=(glbl, st))),
   (UPat(Ops.SINK, src=(UPat.store(UPat(), UPat(), UPat(Ops.COPY, name="copy")))), lambda copy:copy),
-  (UPat(Ops.CONTIGUOUS, src=(UPat.var("x"),)), lambda x:x),
+  (UPat((Ops.CONTIGUOUS, Ops.ASSIGN), name="root"), lambda root: root.src[-1]),
 ])
 
 view_right = merge_views+PatternMatcher([
