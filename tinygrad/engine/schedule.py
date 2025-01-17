@@ -68,29 +68,57 @@ remove_movement_ops = PatternMatcher([
   (UPat(Ops.VIEW, name="mv", src=(UPat.cvar("x"),)), view_const),
 ])
 
-def collapse_const_reduce(root:UOp, x:UOp):
+def simplify_reduceop(reduce:UOp, x:UOp) -> UOp|None:
   if not all_int(x.shape): return None
-  # remove root on unmasked const
-  prshape = prod(unwrap(x.st).shape[i] for i in root.arg[1])
+  # remove reduce on unmasked const
+  prshape = prod(unwrap(x.st).shape[i] for i in reduce.arg[1])
   ret = x.const_arg
-  match root.arg[0]:
+  match reduce.arg[0]:
     case Ops.ADD: ret *= prshape
     case Ops.MUL: ret **= prshape
     case Ops.MAX: pass # NOTE: Ops.MAX is passthrough
     case _: return None
-  return root.const_like(ret)
+  return reduce.const_like(ret)
+
+# NOTE: this ctx maps roots to places they are made contiguous
+def found_contiguous(ctx:dict[UOp, UOp], contig:UOp):
+  if contig.src[0].op is Ops.VIEW and len(contig.src[0].src):
+    old_base = contig.src[0].src[0]
+    if old_base.op is Ops.VIEW and (sti:=unwrap(contig.src[0].st).invert(old_base.shape)) is not None: ctx[old_base] = contig.view(sti)
+def replace_contiguous(ctx:dict[UOp, UOp], alu:UOp):
+  new_src = list(alu.src)
+  for i,s in enumerate(alu.src):
+    if (replace_src:=ctx.get(s, None)) is not None: new_src[i] = replace_src
+  if tuple(new_src) != alu.src: return alu.replace(src=tuple(new_src))
 
 sym = symbolic_simple+PatternMatcher([
+  # op with size 0 is zero
   (UPat(set(Ops)-{Ops.SINK}, name="root"), lambda root: root.const_like(0) if root.base.st is not None and root.size == 0 \
       and not (root.base.op is Ops.CONST and root.base.arg == 0) else None),
-  (UPat(Ops.DETACH, name="root"), lambda root: root.src[0]),
-  (UPat(Ops.REDUCE_AXIS, name="root", src=(UPat(Ops.CONST, arg=0),)), lambda root: root.const_like(identity_element(root.arg[0], root.dtype))),
-  (UPat(Ops.REDUCE_AXIS, name="root", src=(UPat.cvar("x"),)), collapse_const_reduce),
+  # DETACH is a NOOP here
+  (UPat(Ops.DETACH, name="detach"), lambda detach: detach.src[0]),
+  # reduce of size 0 is the identity element
+  (UPat(Ops.REDUCE_AXIS, name="reduce", src=(UPat.var("x"),)),
+   lambda reduce,x: reduce.const_like(identity_element(reduce.arg[0], reduce.dtype)) if x.size == 0 and reduce.size != 0 else None),
+  # reduce of const is collapsed (TODO: make this a generic rule for stride0)
+  (UPat(Ops.REDUCE_AXIS, name="reduce", src=(UPat.cvar("x"),)), simplify_reduceop),
+  # CONST doesn't need COPY
+  (UPat(Ops.COPY, src=(UPat(), UPat.cvar("x"),)), lambda x: x),
+  # no COPY to same device, except clone (arg is True)
+  (UPat(Ops.COPY, src=(UPat(), UPat.var("copyin")), name="copy"),
+   lambda copyin,copy: copyin if copyin.device == copy.device and copy.arg is not True else None),
+  # CONTIGUOUS(VIEW(base)) -> VIEW(CONTIGUOUS(base)) if we can just VIEW the BUFFER
   (UPat(Ops.CONTIGUOUS, src=(UPat(Ops.VIEW, name="view", src=(UPat(set(Ops)-{Ops.CONST}, name="base"),)),)),
    lambda base,view: base.contiguous().view(unwrap(view.st)) if view.st.contiguous and view.size == base.size else None),
+  # remove CONTIGUOUS on BUFFER
   (UPat(Ops.CONTIGUOUS, src=(UPat(Ops.BUFFER, name="buf"),)), lambda buf: buf),
+  # support for using a contiguous permuted view instead of the parent view if one exists
+  (UPat(Ops.CONTIGUOUS, name="contig"), found_contiguous),
+  (UPat(GroupOp.ALU, name="alu"), replace_contiguous),
+  # remove CONST/BIND/BUFFER/VIEW from SINK
   (UPat(Ops.SINK, name="root"),
-   lambda root: root.replace(src=a) if (a:=tuple(dedup(x.base for x in root.src if x.base.op is not Ops.CONST))) != root.src else None),
+    lambda root: UOp(Ops.SINK, root.dtype, new_src, root.arg)
+      if (new_src:=tuple(x.base for x in root.src if not x.is_realized and x.base.op not in {Ops.CONST, Ops.BIND})) != root.src else None),
 ])
 
 def realize(ctx:dict[UOp, None], root:UOp):
@@ -170,7 +198,7 @@ def add_buffer(u:UOp, buffer_map:dict[UOp, UOp], cache:dict[UOp, UOp]):
 def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> tuple[list[ScheduleItem], dict[Variable, int], dict[UOp, UOp]]:
   sink = UOp.sink(*outs)
   if not skip_check: type_verify(list(sink.toposort), tensor_uop_spec)
-  tensor_map = graph_rewrite_map(sink, merge_views+remove_movement_ops+sym)
+  tensor_map = graph_rewrite_map(sink, merge_views+remove_movement_ops+sym, ctx={})
   buffer_map: dict[UOp, UOp] = {}
   sink = add_buffer(tensor_map[sink], buffer_map, cache={})
   realizes: dict[UOp, UOp] = {}
