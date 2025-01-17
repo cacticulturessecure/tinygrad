@@ -145,8 +145,10 @@ def load_buffer(ctx:list[UOp], buf:UOp):
 
 to_ast = PatternMatcher([
   (UPat(Ops.BUFFER, name="buf"), load_buffer),
-  (UPat(Ops.STORE, name="root", src=(UPat(Ops.LOAD, src=(UPat.var("glbl"), UPat())), UPat.var("st"), UPat.var("v"))), lambda root,glbl,st,v: root.replace(src=(glbl, st, v))),
-  (UPat(Ops.LOAD, name="root", src=(UPat(Ops.LOAD, src=(UPat.var("glbl"), UPat())), UPat.var("st"))), lambda root,glbl,st: root.replace(src=(glbl, st))),
+  (UPat(Ops.STORE, name="root", src=(UPat(Ops.LOAD, src=(UPat.var("glbl"), UPat())), UPat.var("st"), UPat.var("v"))),
+   lambda root,glbl,st,v: root.replace(src=(glbl, st, v))),
+  (UPat(Ops.LOAD, name="root", src=(UPat(Ops.LOAD, src=(UPat.var("glbl"), UPat())), UPat.var("st"))),
+   lambda root,glbl,st: root.replace(src=(glbl, st))),
   (UPat(Ops.SINK, src=(UPat.store(UPat(), UPat(), UPat(Ops.COPY, name="copy")))), lambda copy:copy),
   (UPat((Ops.CONTIGUOUS, Ops.ASSIGN), name="root"), lambda root: root.src[-1]),
 ])
