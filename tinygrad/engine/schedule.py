@@ -189,4 +189,8 @@ def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> 
     for t in tensor_uops:
       becomes_map[t] = buf_uop.view(unwrap(t.st))
 
+  # sometimes tensors collapse to a realized buffer, no kernel needed
+  for k,v in tensor_map.items():
+    if k.base is not v.base and v.base.op is Ops.BUFFER: becomes_map[k.base] = v.view(unwrap(k.base.st))
+
   return schedule, {}, becomes_map
