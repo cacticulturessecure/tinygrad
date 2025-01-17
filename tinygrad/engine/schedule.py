@@ -65,7 +65,7 @@ def view_const(mv:UOp, x:UOp):
   unmasked_st = ShapeTracker.from_shape(()).reshape((1,)*len(new_st.shape)).expand(new_st.shape)
   return UOp(Ops.VALID, new_st.to_uop()).where(x.replace(src=(x.src[0].replace(arg=unmasked_st),)), 0)
 
-remove_movement_ops = merge_views+PatternMatcher([
+remove_movement_ops = PatternMatcher([
   (UPat(GroupOp.Movement, name="mov", src=(UPat.var("x"),)), lambda x,mov: x.view(mov.st)),
   (UPat(Ops.VIEW, name="mv", src=(UPat.cvar("x"),)), view_const),
 ])
@@ -82,8 +82,8 @@ def do_sink(ctx:dict[UOp, UOp], root:UOp):
   for x in root.src: realize(ctx, x)
 
 def check_view(ctx:dict[UOp, UOp], root:UOp):
-  if root.buf_uop.size <= root.size and all(v.mask is None for v in unwrap(root.st).views): return None
-  raise Exception()
+  if root.size <= root.buf_uop.size and all(v.mask is None for v in unwrap(root.st).views): return None
+  realize(ctx, root)
 
 class UPatBufferized(UPat):
   def __init__(self, *args, **kwargs): super().__init__(Ops.VIEW, name="root", src=(UPat(Ops.BUFFER), UPat(*args, **kwargs)))
@@ -139,12 +139,12 @@ def add_buffer(u:UOp, buffer_map:dict[UOp, UOp], cache:dict[UOp, UOp]):
 def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> tuple[list[ScheduleItem], dict[Variable, int], dict[UOp, UOp]]:
   sink = UOp.sink(*outs)
   if not skip_check: type_verify(list(sink.toposort), tensor_uop_spec)
-  tensor_map = graph_rewrite_map(sink, remove_movement_ops+sym)
+  tensor_map = graph_rewrite_map(sink, merge_views+remove_movement_ops+sym)
   buffer_map: dict[UOp, UOp] = {}
   sink = add_buffer(tensor_map[sink], buffer_map, cache={})
   realizes: dict[UOp, UOp] = {}
-  graph_rewrite(sink, do_realize, realizes)
-  graph_rewrite(sink, break_sched, ctx:=SchedulerContext(frozenset(realizes), stores={}, var_vals={}))
+  graph_rewrite(sink, merge_views+do_realize, realizes)
+  graph_rewrite(sink, merge_views+break_sched, ctx:=SchedulerContext(frozenset(realizes), stores={}, var_vals={}))
 
   schedule: list[ScheduleItem] = []
   becomes_map: dict[UOp, UOp] = {}
