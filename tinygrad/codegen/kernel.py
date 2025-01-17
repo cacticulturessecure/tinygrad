@@ -581,6 +581,7 @@ class Kernel:
       ret = op.replace(src=tuple(fixup_ast(x) for x in op.src))
       if op.op in GroupOp.Buffer and op in self.bufs:
         st_uop = self.sts[self.bufs.index(op)].to_uop()
+        if op.op is Ops.CONST: return ret.replace(src=()) # for some reason, this is wrong
         return ret.replace(src=(st_uop,)) if op.op is Ops.VALID else ret.replace(src=(ret.src[0], st_uop, *ret.src[2:]))
       if op.op is Ops.SINK: return ret.replace(arg = KernelInfo(self.local_dims, self.upcasted, self.dont_use_locals))
       if op.op is Ops.REDUCE_AXIS:
@@ -696,7 +697,7 @@ def _assert_valid_uop(uop:UOp, st:ShapeTracker, sts:dict[UOp, ShapeTracker]) -> 
   if uop.op in {Ops.REDUCE_AXIS, Ops.WMMA}: st = ShapeTracker.from_shape(sts[uop.src[0]].reduce(uop.axis_arg))
   # movementops are pushed to VIEW
   elif uop.op is Ops.VIEW:
-    assert len(uop.src) == 0, f"can't swizzle in kernel yet {uop}"
+    assert len(uop.src) == 0 or uop.base.op is Ops.DEVICE, f"can't swizzle in kernel yet {uop}"
     st = uop.arg
   # everything else inherits shape
   else:

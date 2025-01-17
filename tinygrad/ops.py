@@ -163,7 +163,7 @@ class GroupOp:
 
   # meta ops
   Meta = {Ops.COPY, Ops.BUFFER_VIEW}
-  Buffer = {Ops.LOAD, Ops.PRELOAD, Ops.STORE, Ops.VALID}
+  Buffer = {Ops.LOAD, Ops.PRELOAD, Ops.STORE, Ops.VALID, Ops.CONST}
   Block = {Ops.BLOCK, Ops.BLOCKEND, Ops.BLOCKFORK, Ops.BLOCKSTART}
 
   # BinaryOps that can be flipped
@@ -235,7 +235,6 @@ class UOpMetaClass(type):
 # some uops map to other stuff
 buffers:weakref.WeakKeyDictionary[UOp, Buffer] = weakref.WeakKeyDictionary() # this maps BUFFER uops to their device Buffers
 all_metadata:weakref.WeakKeyDictionary[UOp, Metadata] = weakref.WeakKeyDictionary()
-forced_realize:weakref.WeakSet[UOp] = weakref.WeakSet()
 
 # NOTE: this should be frozen, but frozen is slower
 @dataclass(eq=False, slots=True)
@@ -289,6 +288,8 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     if self.op in GroupOp.Movement: return unwrap(self.src[0].st).mop(self.op, self.arg)
     # buffer ops return the ShapeTracker from sources
     if self.op in GroupOp.Buffer: return vsrc[0] if len(vsrc:=[x.st for x in self.src if x.op is Ops.VIEW]) != 0 else None
+    from tinygrad.shape.shapetracker import ShapeTracker
+    if self.op is Ops.BUFFER: return ShapeTracker.from_shape((self.size,))
     if not (src_sts := [x.st for x in self.src if x.st is not None]): return None
     assert all_same([x.shape for x in src_sts]), f"UOp sources must have the same shape {self} {[x.shape for x in src_sts]}"
     if self.op in {Ops.BITCAST, Ops.BUFFER_VIEW}:
@@ -297,7 +298,6 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     # only reduce ops are allowed to change shape, everything else derives shape from sources
     elif self.op in {Ops.REDUCE_AXIS, Ops.WMMA}: shape = src_sts[0].reduce(self.axis_arg)
     else: shape = src_sts[0].shape
-    from tinygrad.shape.shapetracker import ShapeTracker
     return ShapeTracker.from_shape(shape)
 
   @functools.cached_property
@@ -411,11 +411,7 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     if DEBUG >= 3: print(f"split {divisor}: {self.shape} -> {splitted.shape} -> {new_shape}")
     return splitted._reduce_op(op, axis)._reduce_op(op, (len(new_shape),)).reshape(new_shape)  # reduce original axes, then split
   def assign(self, x:UOp): return UOp(Ops.ASSIGN, self.dtype, (self,x))
-  def contiguous(self):
-    if not unwrap(self.st).contiguous or self.size != self.base.size or self.base.op is Ops.CONST:
-      return self.alu(Ops.CONTIGUOUS)
-    forced_realize.add(self.base)
-    return self
+  def contiguous(self): return self.alu(Ops.CONTIGUOUS)
 
   # *** from LazyBuffer ***
 
@@ -445,15 +441,13 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
   def lbs(self): return [self]
   @property
   def metadata(self): return all_metadata.get(self, None)
-  @property
-  def forced_realize(self): return self in forced_realize
 
   # *** uop movement ops ***
 
   @property
   def base(self) -> UOp:
     if self.op in GroupOp.Movement: return self.src[0].base
-    return self.src[0].base if self.op is Ops.VIEW and len(self.src) == 1 and self.src[0].op is not Ops.BUFFER else self
+    return self.src[0].base if self.op is Ops.VIEW and len(self.src) == 1 else self
   def view(self, new_st:ShapeTracker) -> UOp: return UOp(Ops.VIEW, self.dtype, (self.base,), new_st)
 
   def _mop(self, op:Ops, arg):
@@ -481,8 +475,8 @@ class UOp(MathTrait, metaclass=UOpMetaClass):
     return dsrcs[0]._device if len(dsrcs:=[x for x in self.src if x._device is not None]) != 0 else None
   @property
   def buf_uop(self) -> UOp:
-    if self.op is Ops.BUFFER: return self
-    assert self.base.op in {*GroupOp.Buffer, Ops.ASSIGN, Ops.VIEW}, f"buf_uop called on {self.op}"
+    if self.base.op is Ops.BUFFER: return self.base
+    assert self.op in {*GroupOp.Buffer, Ops.ASSIGN, Ops.VIEW}, f"buf_uop called on {self.op}"
     return self.src[0].buf_uop
   def buf_uop_view(self) -> UOp: return self.buf_uop.view(unwrap(self.st))
   @property
