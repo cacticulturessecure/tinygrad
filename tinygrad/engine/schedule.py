@@ -71,6 +71,9 @@ remove_movement_ops = PatternMatcher([
 ])
 
 sym = symbolic_simple+PatternMatcher([
+  (UPat(Ops.CONTIGUOUS, src=(UPat(Ops.VIEW, name="view", src=(UPat(set(Ops)-{Ops.CONST}, name="base"),)),)),
+   lambda base,view: base.contiguous().view(unwrap(view.st)) if view.st.contiguous and view.size == base.size else None),
+  (UPat(Ops.CONTIGUOUS, src=(UPat(Ops.BUFFER, name="buf"),)), lambda buf: buf),
   (UPat(Ops.SINK, name="root"),
    lambda root: root.replace(src=a) if (a:=tuple(dedup(x.base for x in root.src if x.base.op is not Ops.CONST))) != root.src else None),
 ])
@@ -90,7 +93,7 @@ class UPatBufferized(UPat):
 
 do_realize = PatternMatcher([
   (UPat(Ops.SINK, name="root"), do_sink),
-  (UPatBufferized(Ops.COPY), realize),
+  (UPatBufferized((Ops.COPY, Ops.CONTIGUOUS)), realize),
   (UPatBufferized(Ops.REDUCE_AXIS), realize),
   (UPat(Ops.COPY, src=(UPat(), UPatBufferized(set(Ops)),)), realize),
   (UPatBufferized(set(Ops)), check_view),
@@ -115,14 +118,20 @@ break_sched = PatternMatcher([
   (UPat(Ops.VIEW, name="st", src=(UPat(Ops.BUFFER, name="buf"), UPat.var("root"))), store_or_fuse),
 ])
 
-def remove_buffer(ctx:list[UOp], buf:UOp):
+def load_buffer(ctx:list[UOp], buf:UOp):
   ctx.append(buf)
-  return UOp(Ops.DEFINE_GLOBAL, buf.dtype.ptr(buf.size), (), len(ctx)-1)
+  glbl = UOp(Ops.DEFINE_GLOBAL, buf.dtype.ptr(buf.size), (), len(ctx)-1)
+  return UOp(Ops.LOAD, buf.dtype, (glbl, unwrap(buf.st).to_uop()))
 
 to_ast = PatternMatcher([
-  (UPat(Ops.BUFFER, name="buf"), remove_buffer),
+  (UPat(Ops.BUFFER, name="buf"), load_buffer),
+  (UPat(Ops.STORE, name="root", src=(UPat(Ops.LOAD, src=(UPat.var("glbl"), UPat())), UPat.var("st"), UPat.var("v"))), lambda root,glbl,st,v: root.replace(src=(glbl, st, v))),
+  (UPat(Ops.LOAD, name="root", src=(UPat(Ops.LOAD, src=(UPat.var("glbl"), UPat())), UPat.var("st"))), lambda root,glbl,st: root.replace(src=(glbl, st))),
   (UPat(Ops.SINK, src=(UPat.store(UPat(), UPat(), UPat(Ops.COPY, name="copy")))), lambda copy:copy),
   (UPat(Ops.CONTIGUOUS, src=(UPat.var("x"),)), lambda x:x),
+])
+
+view_right = merge_views+PatternMatcher([
 ])
 
 def add_buffer(u:UOp, buffer_map:dict[UOp, UOp], cache:dict[UOp, UOp]):
@@ -143,7 +152,7 @@ def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> 
   buffer_map: dict[UOp, UOp] = {}
   sink = add_buffer(tensor_map[sink], buffer_map, cache={})
   realizes: dict[UOp, UOp] = {}
-  graph_rewrite(sink, merge_views+do_realize, realizes)
+  sink = graph_rewrite(sink, merge_views+do_realize, realizes)
   graph_rewrite(sink, merge_views+break_sched, ctx:=SchedulerContext(frozenset(realizes), stores={}, var_vals={}))
 
   schedule: list[ScheduleItem] = []
@@ -151,6 +160,7 @@ def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> 
   for buf_uop, store in ctx.stores.items():
     si_bufs: list[UOp] = []
     ast = graph_rewrite(store.sink(), view_left+to_ast, si_bufs)
+    ast = graph_rewrite(ast, view_right, si_bufs)
     schedule.append(ScheduleItem(ast, tuple(x.buffer for x in si_bufs), ()))
     tensor_uops = [k for k,v in tensor_map.items() if v is buffer_map[buf_uop]]
     for t in tensor_uops:
