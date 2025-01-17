@@ -383,6 +383,13 @@ ops_folding = symbolic_simple+PatternMatcher([
   # no COPY to same device, except clone (arg is True)
   (UPatScheduled(Ops.COPY, src=(UPat(), UPat(Ops.VIEW, name="copyin")), name="copy"),
    lambda base,b,copyin,copy: copyin if copyin.device == copy.device and copy.arg is not True else None),
+  # support for folding a contigous if the source is contiguous
+  (UPat(Ops.CONTIGUOUS, src=(UPatScheduled(name="op"),)), lambda op,b,base: base.replace(src=(b, op.contiguous()))),
+  # CONTIGUOUS(VIEW(x)) -> CONTIGUOS(x).view() if we can fold it
+  (UPat(Ops.CONTIGUOUS, name="root", src=(UPat(Ops.VIEW, name="view", src=(UPat.var("x"),)),)),
+   lambda root,x,view: root.replace(src=(x,)).view(view.st) if view.st.contiguous and view.size == x.size and x.op is not Ops.CONST else None),
+  # remove CONTIGUOUS on BUFFER
+  (UPat(Ops.CONTIGUOUS, src=(UPat(Ops.BUFFER, name="buf"),)), lambda buf: buf),
   # support for using a contiguous permuted view instead of the parent view if one exists
   (UPatScheduled(Ops.CONTIGUOUS, name="contig"), found_contiguous),
   (UPat(GroupOp.ALU, name="alu"), replace_contiguous),
