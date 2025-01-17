@@ -161,7 +161,8 @@ def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> 
     si_bufs: list[UOp] = []
     ast = graph_rewrite(store.sink(), view_left+to_ast, si_bufs)
     ast = graph_rewrite(ast, view_right, si_bufs)
-    schedule.append(ScheduleItem(ast, tuple(x.buffer for x in si_bufs), ()))
+    schedule.append(si:=ScheduleItem(ast, tuple(x.buffer for x in si_bufs), ()))
+    for buf in si.bufs: buf.ref(1)
     tensor_uops = [k for k,v in tensor_map.items() if v is buffer_map[buf_uop]]
     for t in tensor_uops:
       becomes_map[t] = buf_uop.view(unwrap(t.st))
