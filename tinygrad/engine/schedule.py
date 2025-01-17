@@ -62,15 +62,29 @@ class ScheduleItem:
 def view_const(mv:UOp, x:UOp):
   new_st = unwrap(x.st)+unwrap(mv.st)
   if new_st.views[0].mask is None: return x.replace(src=(x.src[0].replace(arg=new_st),))
-  unmasked_st = ShapeTracker.from_shape(()).reshape((1,)*len(new_st.shape)).expand(new_st.shape)
-  return UOp(Ops.VALID, new_st.to_uop()).where(x.replace(src=(x.src[0].replace(arg=unmasked_st),)), 0)
 
 remove_movement_ops = PatternMatcher([
   (UPat(GroupOp.Movement, name="mov", src=(UPat.var("x"),)), lambda x,mov: x.view(mov.st)),
   (UPat(Ops.VIEW, name="mv", src=(UPat.cvar("x"),)), view_const),
 ])
 
+def collapse_const_reduce(root:UOp, x:UOp):
+  if not all_int(x.shape): return None
+  # remove root on unmasked const
+  prshape = prod(unwrap(x.st).shape[i] for i in root.arg[1])
+  ret = x.const_arg
+  match root.arg[0]:
+    case Ops.ADD: ret *= prshape
+    case Ops.MUL: ret **= prshape
+    case Ops.MAX: pass # NOTE: Ops.MAX is passthrough
+    case _: return None
+  return root.const_like(ret)
+
 sym = symbolic_simple+PatternMatcher([
+  (UPat(set(Ops)-{Ops.SINK}, name="root"), lambda root: root.const_like(0) if root.base.st is not None and root.size == 0 \
+      and not (root.base.op is Ops.CONST and root.base.arg == 0) else None),
+  (UPat(Ops.REDUCE_AXIS, name="root", src=(UPat(Ops.CONST, arg=0),)), lambda root: root.const_like(identity_element(root.arg[0], root.dtype))),
+  (UPat(Ops.REDUCE_AXIS, name="root", src=(UPat.cvar("x"),)), collapse_const_reduce),
   (UPat(Ops.CONTIGUOUS, src=(UPat(Ops.VIEW, name="view", src=(UPat(set(Ops)-{Ops.CONST}, name="base"),)),)),
    lambda base,view: base.contiguous().view(unwrap(view.st)) if view.st.contiguous and view.size == base.size else None),
   (UPat(Ops.CONTIGUOUS, src=(UPat(Ops.BUFFER, name="buf"),)), lambda buf: buf),
@@ -113,9 +127,14 @@ def store_or_fuse(ctx:SchedulerContext, buf:UOp, root:UOp, st:UOp):
 def load_realized(ctx:SchedulerContext, buf:UOp, st:UOp):
   return UOp(Ops.LOAD, buf.dtype, (buf, unwrap(st.st).to_uop()))
 
+def make_valid(st:UOp, x:UOp):
+  unmasked_st = ShapeTracker.from_shape(()).reshape((1,)*len(st.shape)).expand(st.shape)
+  return UOp(Ops.VALID, dtypes.bool, (unwrap(st.st).to_uop(),)).where(x.replace(src=(x.src[0].replace(arg=unmasked_st),)), 0)
+
 break_sched = PatternMatcher([
   (UPat(Ops.VIEW, name="st", src=(UPat(Ops.BUFFER, name="buf"),)), load_realized),
   (UPat(Ops.VIEW, name="st", src=(UPat(Ops.BUFFER, name="buf"), UPat.var("root"))), store_or_fuse),
+  (UPat(Ops.VIEW, name="st", src=(UPat(Ops.CONST, name="x"))), make_valid),
 ])
 
 def load_buffer(ctx:list[UOp], buf:UOp):
@@ -153,7 +172,7 @@ def create_schedule_with_vars(outs:list[UOp], skip_check:bool=not __debug__) -> 
   sink = add_buffer(tensor_map[sink], buffer_map, cache={})
   realizes: dict[UOp, UOp] = {}
   sink = graph_rewrite(sink, merge_views+do_realize, realizes)
-  graph_rewrite(sink, merge_views+break_sched, ctx:=SchedulerContext(frozenset(realizes), stores={}, var_vals={}))
+  graph_rewrite(sink, merge_views+remove_movement_ops+break_sched, ctx:=SchedulerContext(frozenset(realizes), stores={}, var_vals={}))
 
   schedule: list[ScheduleItem] = []
   becomes_map: dict[UOp, UOp] = {}
